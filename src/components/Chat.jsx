@@ -21,6 +21,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { calculateAge, decode } from "../utils/Helper";
 import { IoClose } from "react-icons/io5";
 import socket from "../Socket/socket";
+import getSocket from "../Socket/socket";
 
 const ChatDashboard = () => {
   const location = useLocation();
@@ -34,22 +35,38 @@ const ChatDashboard = () => {
   const [selectedUser, setSelectedUser] = useState(null);
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState("");
+  const [roomId, setRoomId] = useState(undefined);
   const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [currentView, setCurrentView] = useState("users"); // 'users', 'chat', 'profile'
   const [currentProfileImage, setCurrentProfileImage] = useState(0);
   const messagesEndRef = useRef(null);
+  // const [socket, setSocket] = useState(null);
+  const socketRef = useRef(null);
+
+  const tokenData = decode(token);
 
   useEffect(() => {
     fetchChatUsers();
-    socket.on("receive_message", (msg) => {
-      console.log("Sent Message:", msg);
-    });
+    const socket = getSocket();
+
+    if (socket) {
+      socketRef.current = socket;
+
+      const handleMessage = (msg) => {
+        setMessages((prevMessages) => [...prevMessages, msg]);
+        console.log("Received message:", msg);
+      };
+
+      socketRef.current.on("receive_message", handleMessage);
+    }
 
     return () => {
-      socket.off("receiveMessage");
+      socketRef.current.off("receiveMessage");
+      socketRef.current.disconnect(); //CleanUp function
     };
-  }, [apiurl, token, socket]);
+  }, []);
 
+  //Fetch Users
   const fetchChatUsers = async () => {
     try {
       const data = decode(token);
@@ -76,13 +93,19 @@ const ChatDashboard = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const fetchMessages = async (userId) => {
+  //Fetch Messages
+  const fetchMessages = async (receiverId) => {
+    // debugger;
+    if (!receiverId) return toast.error("No receiver Id");
     try {
-      const res = await axios.get(`${apiurl}/chat/messages/${userId}`, {
-        headers: {
-          authorization: `Bearer ${token}`,
-        },
-      });
+      const res = await axios.get(
+        `${apiurl}/chat/fetchMessages?receiverId=${receiverId}`,
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+          },
+        }
+      );
       if (res?.data) {
         setMessages(res?.data?.messages || []);
       }
@@ -93,25 +116,59 @@ const ChatDashboard = () => {
     }
   };
 
+  //Create a new chat room
+  const createRoom = async (otheruserId) => {
+    if (!token) return toast.error("No token to create a room");
+    if (!otheruserId) return toast.error("No user selected");
+
+    try {
+      const res = await axios.post(
+        `${apiurl}/chat/createChatRoom`,
+        { otheruserId },
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+          },
+        }
+      );
+      const roomId = res?.data?.data?.roomId;
+      if (roomId) {
+        setRoomId(roomId);
+        toast.success(`Room Id: ${roomId}`);
+      }
+    } catch (error) {
+      console.error(error);
+      toast.error("Error while joining chat room");
+    }
+  };
+
+  // console.log("Room ID: ", roomId);
+
+  //Send a message to a particular user
   const sendMessage = async () => {
     if (!newMessage.trim() || !selectedUser) return;
+    if (!roomId) return toast.error("No room id.");
+    
     const data = decode(token);
 
     const payload = {
       senderId: data?._id,
-      receiverId: selectedUser?.likeBy?._id,
+      // receiverId: selectedUser?.likeBy?._id,
       message: newMessage,
+      roomId,
     };
 
-    socket.emit("send_message", payload);
-    console.log(payload);
+    socketRef?.current?.emit("private-message", payload);
+    setNewMessage("");
   };
 
-  const selectUser = (user, index) => {
+  //Select a user and create a room
+  const selectUser = async (user, index) => {
     setSelectedUser(user);
     setCurrentProfileImage(0);
-    fetchMessages(user._id);
+    fetchMessages(user?.likeBy?._id);
     setCurrentView("chat");
+    createRoom(user?.likeBy?._id);
   };
 
   const viewProfile = (user) => {
@@ -146,7 +203,6 @@ const ChatDashboard = () => {
   };
 
   const rejectMatch = async (selectedUser) => {
-    debugger;
     const data = decode(token);
     try {
       const res = await axios.delete(
@@ -236,17 +292,15 @@ const ChatDashboard = () => {
               {chatUsers.length > 0 ? (
                 chatUsers.map((user) => (
                   <div
-                    key={user._id}
+                    key={user?.likeby?._id}
                     className="flex items-center p-3 rounded-lg bg-white bg-opacity-10 hover:bg-opacity-20 transition mb-2 cursor-pointer"
                     onClick={() => {
-                      debugger;
-                      localStorage.setItem("receiver_id", user?.likeBy?._id);
                       selectUser(user);
                     }}
                   >
-                    {user.profilePhotos?.[0] ? (
+                    {user?.likeBy?.profilePhotos ? (
                       <img
-                        src={`${imageApi}/${user.profilePhotos[0]}`}
+                        src={`${imageApi}/${user?.likeBy?.profilePhotos[0]}`}
                         alt={user.name}
                         className="w-12 h-12 rounded-full object-cover mr-3"
                       />
@@ -254,10 +308,10 @@ const ChatDashboard = () => {
                       <FaUserCircle className="text-4xl text-white text-opacity-70 mr-3" />
                     )}
                     <div>
-                      <p className="font-semibold">{user.name}</p>
-                      <p className="text-sm opacity-80">
+                      <p className="font-semibold">{user?.likeBy?.name}</p>
+                      {/* <p className="text-sm opacity-80">
                         {calculateAge(user.dob)} ({user.pronouns})
-                      </p>
+                      </p> */}
                     </div>
                     <button
                       onClick={(e) => {
@@ -278,7 +332,7 @@ const ChatDashboard = () => {
 
           {/* Chat View */}
           {currentView === "chat" && selectedUser && (
-            <div className="bg-white bg-opacity-10 backdrop-blur-md rounded-2xl p-4 flex flex-col h-[calc(100vh-180px)] shadow-lg">
+            <div className="flex flex-col h-full bg-white bg-opacity-10 backdrop-blur-md rounded-2xl p-4 shadow-lg">
               <div className="flex items-center mb-4">
                 <button
                   onClick={() => setCurrentView("users")}
@@ -286,7 +340,9 @@ const ChatDashboard = () => {
                 >
                   <FaChevronLeft size={20} />
                 </button>
-                <h2 className="text-xl font-semibold">{selectedUser.name}</h2>
+                <h2 className="text-xl font-semibold">
+                  {selectedUser?.likeBy?.name}
+                </h2>
                 <button
                   onClick={() => viewProfile(selectedUser)}
                   className="ml-auto text-sm bg-white bg-opacity-20 px-2 py-1 rounded"
@@ -294,40 +350,44 @@ const ChatDashboard = () => {
                   Profile
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto mb-4 space-y-2">
+
+              {/* Chat messages */}
+              <div className="flex-1 min-h-0 overflow-y-auto mb-2 space-y-2">
                 {messages.map((msg, index) => (
                   <div
                     key={index}
                     className={`flex ${
-                      msg.senderId === selectedUser._id
+                      msg.senderId === selectedUser?.likeBy?._id
                         ? "justify-start"
                         : "justify-end"
                     }`}
                   >
                     <div
                       className={`max-w-xs p-3 rounded-lg ${
-                        msg.senderId === selectedUser._id
-                          ? "bg-white bg-opacity-20"
-                          : "bg-pink-500"
+                        msg.senderId === selectedUser?.likeBy?._id
+                          ? "bg-pink-500 text-white"
+                          : "bg-white bg-opacity-20 text-black"
                       }`}
                     >
-                      <p>{msg.content}</p>
+                      <p>{msg.message}</p>
                     </div>
                   </div>
                 ))}
                 <div ref={messagesEndRef} />
               </div>
-              <div className="flex items-center mt-auto">
+
+              {/* Input bar */}
+              <div className="flex items-center">
                 <input
                   type="text"
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
-                  onKeyPress={(e) => e.key === "Enter" && sendMessage()}
+                  onKeyDown={(e) => e.key === "Enter" && sendMessage()}
                   placeholder="Type a message..."
                   className="flex-1 p-2 rounded-l-lg bg-white bg-opacity-20 text-white placeholder-white placeholder-opacity-50 focus:outline-none"
                 />
                 <button
-                  onClick={sendMessage}
+                  onClick={() => sendMessage()}
                   className="p-2 bg-pink-500 rounded-r-lg hover:bg-pink-600"
                 >
                   <IoMdSend />
@@ -348,7 +408,9 @@ const ChatDashboard = () => {
                 >
                   <FaChevronLeft size={20} />
                 </button>
-                <h2 className="text-xl font-semibold">{selectedUser.name}</h2>
+                <h2 className="text-xl font-semibold">
+                  {selectedUser?.likeBy?.name}
+                </h2>
                 <button
                   onClick={() => selectUser(selectedUser)}
                   className="ml-auto text-sm bg-white bg-opacity-20 px-2 py-1 rounded"
@@ -357,11 +419,10 @@ const ChatDashboard = () => {
                 </button>
               </div>
               <div className="relative w-full max-w-[320px] mx-auto aspect-[3/4] rounded-lg overflow-hidden bg-white bg-opacity-30 mb-4">
-                {selectedUser.profilePhotos?.[currentProfileImage] ? (
+                {selectedUser?.likeBy?.profilePhotos ? (
                   <>
                     <img
-                      src={`${imageApi}/${selectedUser.profilePhotos[currentProfileImage]}`}
-                      alt="Profile"
+                      src={`${imageApi}/${selectedUser?.likeBy?.profilePhotos[currentProfileImage]}`}
                       className="w-full h-full object-cover"
                     />
                     <button
@@ -384,14 +445,15 @@ const ChatDashboard = () => {
                 )}
                 <div className="absolute bottom-0 w-full p-4 text-left bg-gradient-to-t from-black/70 to-transparent">
                   <p className="font-bold text-lg">
-                    {selectedUser.name}, {calculateAge(selectedUser.dob)}
+                    {selectedUser?.likeBy?.name},{" "}
+                    {calculateAge(selectedUser?.likeBy?.dob)}
                   </p>
                   <p className="text-sm opacity-80">
-                    ({selectedUser.pronouns})
+                    ({selectedUser?.likeBy?.pronouns})
                   </p>
                   <div className="flex items-center text-sm mt-1">
                     <FaMapMarkerAlt className="mr-2 text-white" />
-                    <p>{selectedUser.location}</p>
+                    <p>{selectedUser.likeBy?.location}</p>
                   </div>
                 </div>
               </div>
@@ -399,19 +461,19 @@ const ChatDashboard = () => {
                 <div className="flex items-start">
                   <FaInfoCircle className="mr-2 mt-0.5 text-white text-opacity-70 flex-shrink-0" />
                   <p className="text-sm">
-                    {selectedUser.bio || "No bio available"}
+                    {selectedUser?.likeBy?.bio || "No bio available"}
                   </p>
                 </div>
                 <div className="flex items-center">
                   <FaVenusMars className="mr-2 text-white text-opacity-70" />
                   <p className="text-sm">
-                    {selectedUser.gender || "Not specified"}
+                    {selectedUser?.likeBy?.gender || "Not specified"}
                   </p>
                 </div>
                 <div className="flex items-center">
                   <FaHeart className="mr-2 text-white text-opacity-70" />
                   <p className="text-sm">
-                    {selectedUser.sexuality || "Not specified"}
+                    {selectedUser?.likeBy?.sexuality || "Not specified"}
                   </p>
                 </div>
               </div>
@@ -434,10 +496,6 @@ const ChatDashboard = () => {
                       : "bg-white bg-opacity-10 hover:bg-opacity-20"
                   }`}
                   onClick={() => {
-                    debugger;
-
-                    localStorage.setItem("receiver_id", user?.likeBy?._id);
-
                     selectUser(user, index);
                   }}
                 >
@@ -471,10 +529,10 @@ const ChatDashboard = () => {
               <>
                 <div className="flex items-center mb-4">
                   <div className="flex items-center">
-                    {selectedUser.profilePhotos?.[0] ? (
+                    {selectedUser?.likeBy.profilePhotos[0] ? (
                       <img
-                        src={`${imageApi}/${selectedUser.profilePhotos[0]}`}
-                        alt={selectedUser.name}
+                        src={`${imageApi}/${selectedUser?.likeBy?.profilePhotos[0]}`}
+                        alt={selectedUser.likeBy.name}
                         className="w-10 h-10 rounded-full object-cover mr-3"
                       />
                     ) : (
@@ -492,40 +550,65 @@ const ChatDashboard = () => {
                     View Profile
                   </button>
                 </div>
-                <div className="flex-1 overflow-y-auto mb-4 space-y-2">
+                {/* <div className="flex-1 overflow-y-auto mb-4 space-y-2">
                   {messages.map((msg, index) => (
                     <div
                       key={index}
                       className={`flex ${
-                        msg.senderId === selectedUser._id
+                        msg.senderId === selectedUser?.likeby?._id
                           ? "justify-start"
                           : "justify-end"
                       }`}
                     >
                       <div
                         className={`max-w-md p-3 rounded-lg ${
-                          msg.senderId === selectedUser._id
+                          msg.senderId === tokenData?._id
                             ? "bg-white bg-opacity-20"
                             : "bg-pink-500"
                         }`}
                       >
-                        <p>{msg.content}</p>
+                        <p>{msg.message}</p>
+                      </div>
+                    </div>
+                  ))}
+                  <div ref={messagesEndRef} />
+                </div> */}
+
+                <div className="flex-1 overflow-y-auto mb-4 space-y-2">
+                  {messages.map((msg, index) => (
+                    <div
+                      key={index}
+                      className={`flex ${
+                        msg.senderId === tokenData?._id
+                          ? "justify-end"
+                          : "justify-start"
+                      }`}
+                    >
+                      <div
+                        className={`max-w-md p-3 rounded-lg ${
+                          msg.senderId === tokenData?._id
+                            ? "bg-white bg-opacity-20 text-black"
+                            : "bg-pink-500 text-white"
+                        }`}
+                      >
+                        <p>{msg.message}</p>
                       </div>
                     </div>
                   ))}
                   <div ref={messagesEndRef} />
                 </div>
+
                 <div className="flex items-center mt-auto">
                   <input
                     type="text"
                     value={newMessage}
                     onChange={(e) => setNewMessage(e.target.value)}
-                    onKeyPress={(e) => e.key === "Enter" && sendMessage()}
+                    onKeyDown={(e) => e.key === "Enter" && sendMessage()}
                     placeholder="Type a message..."
                     className="flex-1 p-3 rounded-l-lg bg-white bg-opacity-20 text-white placeholder-white placeholder-opacity-50 focus:outline-none"
                   />
                   <button
-                    onClick={sendMessage}
+                    onClick={() => sendMessage()}
                     className="p-3 bg-pink-500 rounded-r-lg hover:bg-pink-600"
                   >
                     <IoMdSend size={20} />
@@ -551,7 +634,9 @@ const ChatDashboard = () => {
               <>
                 <h2 className="text-xl font-semibold mb-4">Profile</h2>
                 <div className="relative w-full aspect-[3/4] rounded-lg overflow-hidden bg-white bg-opacity-30 mb-4">
-                  {selectedUser.likeBy.profilePhotos?.[currentProfileImage] ? (
+                  {selectedUser?.likeBy?.profilePhotos?.[
+                    currentProfileImage
+                  ] ? (
                     <>
                       <img
                         src={`${imageApi}/${selectedUser?.likeBy?.profilePhotos[currentProfileImage]}`}
@@ -578,15 +663,15 @@ const ChatDashboard = () => {
                   )}
                   <div className="absolute bottom-0 w-full p-4 text-left bg-gradient-to-t from-black/70 to-transparent">
                     <p className="font-bold text-sm">
-                      {selectedUser.likeBy.name},{" "}
-                      {calculateAge(selectedUser.likeBy.dob)}
+                      {selectedUser?.likeBy?.name},{" "}
+                      {calculateAge(selectedUser?.likeBy?.dob)}
                     </p>
                     <p className="text-xs opacity-80">
-                      ({selectedUser.likeBy.pronouns})
+                      ({selectedUser?.likeBy?.pronouns})
                     </p>
                     <div className="flex items-center text-xs mt-1">
                       <FaMapMarkerAlt className="mr-2 text-white" />
-                      <p>{selectedUser.likeBy.location}</p>
+                      <p>{selectedUser?.likeBy?.location}</p>
                     </div>
                   </div>
                 </div>
